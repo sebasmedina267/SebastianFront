@@ -1,0 +1,16 @@
+version: '3.9'
+
+services:
+  
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: https://www.backend.daseja.systems/api
+    container_name: prueba-sebastian-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - '5173:80'
