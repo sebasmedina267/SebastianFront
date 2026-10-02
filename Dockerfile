@@ -6,7 +6,7 @@ COPY package*.json ./
 RUN npm install
 
 COPY . .
-ARG VITE_API_URL=http://localhost:3000/api
+ARG VITE_API_URL=https://www.back.daseja.systems
 ENV VITE_API_URL=${VITE_API_URL}
 RUN npm run build
 
