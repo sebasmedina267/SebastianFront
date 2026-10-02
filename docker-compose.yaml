@@ -6,7 +6,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        VITE_API_URL: https://www.backend.daseja.systems
+        VITE_API_URL: https://www.back.daseja.systems
     container_name: prueba-sebastian-frontend
     restart: unless-stopped
     ports:
