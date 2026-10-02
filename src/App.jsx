@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { apiFetch } from './api.js';
+import { initWebSocket, onWSMessage } from './services/websocket.js';
+
 import DashboardPage from './pages/DashboardPage.jsx';
 import TasksPage from './pages/TasksPage.jsx';
 import ClientsPage from './pages/ClientsPage.jsx';
@@ -20,6 +22,49 @@ function App() {
   const [clients, setClients] = useState([]);
   const [sessions, setSessions] = useState([]);
 
+  // ⭐ Inicializar WebSocket una sola vez
+  useEffect(() => {
+    initWebSocket();
+
+    // Escuchar mensajes del WebSocket
+    const unsubscribe = onWSMessage((data) => {
+      console.log("Mensaje WS recibido:", data);
+
+      // Ejemplo de integración real:
+      if (data.type === "newTask") {
+        setTasks((current) => [data.task, ...current]);
+        setDashboard((current) => ({
+          ...current,
+          tasks: [data.task, ...current.tasks],
+          summary: {
+            ...current.summary,
+            totalTasks: (current.summary.totalTasks || 0) + 1,
+            openTasks: (current.summary.openTasks || 0) + 1
+          }
+        }));
+      }
+
+      if (data.type === "newClient") {
+        setClients((current) => [data.client, ...current]);
+        setDashboard((current) => ({
+          ...current,
+          clients: [data.client, ...current.clients]
+        }));
+      }
+
+      if (data.type === "newSession") {
+        setSessions((current) => [data.session, ...current]);
+        setDashboard((current) => ({
+          ...current,
+          sessions: [data.session, ...current.sessions]
+        }));
+      }
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  // Funciones API REST
   const addTask = async (title) => {
     const newTask = await apiFetch('/tasks', {
       method: 'POST',
@@ -46,19 +91,25 @@ function App() {
     setTasks((current) =>
       current.map((task) => (task.id === id ? updatedTask : task))
     );
+
     setDashboard((current) => ({
       ...current,
       tasks: current.tasks.map((task) => (task.id === id ? updatedTask : task)),
       summary: {
         ...current.summary,
-        completedTasks: current.tasks.filter((task) => task.status === 'Completada').length + (updatedTask.status === 'Completada' ? 1 : -1),
-        openTasks: current.tasks.filter((task) => task.status === 'Pendiente').length + (updatedTask.status === 'Pendiente' ? 1 : -1)
+        completedTasks:
+          current.tasks.filter((task) => task.status === 'Completada').length +
+          (updatedTask.status === 'Completada' ? 1 : -1),
+        openTasks:
+          current.tasks.filter((task) => task.status === 'Pendiente').length +
+          (updatedTask.status === 'Pendiente' ? 1 : -1)
       }
     }));
   };
 
   const deleteTask = async (id) => {
     await apiFetch(`/tasks/${id}`, { method: 'DELETE' });
+
     setTasks((current) => current.filter((task) => task.id !== id));
     setDashboard((current) => ({
       ...current,
@@ -92,6 +143,7 @@ function App() {
     }));
   };
 
+  // Cargar datos iniciales del backend
   useEffect(() => {
     let isMounted = true;
 
