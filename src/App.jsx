@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { apiFetch } from './api.js';
 import { initWebSocket, onWSMessage, onWSStatus } from './services/websocket.js';
 
@@ -28,6 +28,38 @@ const emptyDashboard = {
 };
 
 const sameId = (first, second) => String(first) === String(second);
+
+const normalizeWSMessage = (message) => {
+  let normalized = message;
+
+  for (let depth = 0; depth < 3; depth += 1) {
+    if (normalized?.type === 'broadcast' && typeof normalized.message === 'string') {
+      try {
+        normalized = JSON.parse(normalized.message);
+        continue;
+      } catch {
+        return normalized;
+      }
+    }
+    if (normalized?.type === 'broadcast' && normalized.message && typeof normalized.message === 'object') {
+      normalized = normalized.message;
+      continue;
+    }
+    break;
+  }
+
+  if (normalized?.type === 'newTask' && normalized.task) {
+    return { ...normalized, type: 'tasks:created', payload: { task: normalized.task } };
+  }
+  if (normalized?.type === 'newClient' && normalized.client) {
+    return { ...normalized, type: 'clients:created', payload: { client: normalized.client } };
+  }
+  if (normalized?.type === 'newSession' && normalized.session) {
+    return { ...normalized, type: 'sessions:created', payload: { session: normalized.session } };
+  }
+
+  return normalized;
+};
 
 const updateDashboard = (dashboard, message) => {
   const { type, payload = {} } = message;
@@ -84,20 +116,46 @@ function App() {
   const [backendStatus, setBackendStatus] = useState('Comprobando...');
   const [socketStatus, setSocketStatus] = useState('disconnected');
   const [dashboard, setDashboard] = useState(emptyDashboard);
+  const dashboardRevision = useRef(0);
 
   useEffect(() => {
     let isMounted = true;
     let initialDataLoaded = false;
     const pendingMessages = [];
 
+    const refreshDashboard = async (revision = dashboardRevision.current) => {
+      try {
+        const dashboardData = await apiFetch('/dashboard');
+        if (!isMounted || revision !== dashboardRevision.current) return;
+        setDashboard({
+          ...emptyDashboard,
+          ...dashboardData,
+          summary: { ...emptyDashboard.summary, ...dashboardData.summary }
+        });
+      } catch (error) {
+        console.error('Error sincronizando datos en tiempo real:', error);
+      }
+    };
+
     const unsubscribeMessages = onWSMessage((message) => {
       if (!initialDataLoaded) {
-        pendingMessages.push(message);
+        pendingMessages.push(normalizeWSMessage(message));
         return;
       }
-      setDashboard((current) => updateDashboard(current, message));
+      const normalizedMessage = normalizeWSMessage(message);
+      if (normalizedMessage?.type === 'welcome') return;
+
+      dashboardRevision.current += 1;
+      const revision = dashboardRevision.current;
+      setDashboard((current) => updateDashboard(current, normalizedMessage));
+      refreshDashboard(revision);
     });
-    const unsubscribeStatus = onWSStatus(setSocketStatus);
+    const unsubscribeStatus = onWSStatus((status) => {
+      setSocketStatus(status);
+      if (status === 'connected' && initialDataLoaded) {
+        refreshDashboard();
+      }
+    });
     const stopWebSocket = initWebSocket();
 
     const loadData = async () => {
@@ -116,6 +174,7 @@ function App() {
           summary: { ...emptyDashboard.summary, ...dashboardData.summary }
         });
         initialDataLoaded = true;
+        dashboardRevision.current += 1;
         setDashboard(currentDashboard);
       } catch (error) {
         if (!isMounted) return;
