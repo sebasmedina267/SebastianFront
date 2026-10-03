@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { apiFetch } from './api.js';
-import { initWebSocket, onWSMessage } from './services/websocket.js';
+import { initWebSocket, onWSMessage, onWSStatus } from './services/websocket.js';
 
 import DashboardPage from './pages/DashboardPage.jsx';
 import TasksPage from './pages/TasksPage.jsx';
@@ -14,72 +14,139 @@ const navItems = [
   { id: 'sessions', label: 'Sesiones' }
 ];
 
+const emptyDashboard = {
+  summary: {
+    totalTasks: 0,
+    completedTasks: 0,
+    openTasks: 0,
+    activeClients: 0,
+    confirmedSessions: 0
+  },
+  tasks: [],
+  clients: [],
+  sessions: []
+};
+
+const sameId = (first, second) => String(first) === String(second);
+
+const updateDashboard = (dashboard, message) => {
+  const { type, payload = {} } = message;
+  const next = (() => {
+    if (type === 'tasks:created' && payload.task) {
+      return {
+        ...dashboard,
+        tasks: [payload.task, ...dashboard.tasks.filter((task) => !sameId(task.id, payload.task.id))]
+      };
+    }
+    if (type === 'tasks:updated' && payload.task) {
+      return {
+        ...dashboard,
+        tasks: dashboard.tasks.map((task) => sameId(task.id, payload.task.id) ? payload.task : task)
+      };
+    }
+    if (type === 'tasks:deleted' && payload.id !== undefined) {
+      return {
+        ...dashboard,
+        tasks: dashboard.tasks.filter((task) => !sameId(task.id, payload.id))
+      };
+    }
+    if (type === 'clients:created' && payload.client) {
+      return {
+        ...dashboard,
+        clients: [payload.client, ...dashboard.clients.filter((client) => !sameId(client.id, payload.client.id))]
+      };
+    }
+    if (type === 'sessions:created' && payload.session) {
+      return {
+        ...dashboard,
+        sessions: [payload.session, ...dashboard.sessions.filter((session) => !sameId(session.id, payload.session.id))]
+      };
+    }
+    return null;
+  })();
+
+  if (!next) return dashboard;
+
+  return {
+    ...next,
+    summary: {
+      totalTasks: next.tasks.length,
+      completedTasks: next.tasks.filter((task) => task.status === 'Completada').length,
+      openTasks: next.tasks.filter((task) => task.status === 'Pendiente').length,
+      activeClients: next.clients.filter((client) => client.status === 'Activa').length,
+      confirmedSessions: next.sessions.filter((session) => session.status === 'Confirmada').length
+    }
+  };
+};
+
 function App() {
   const [activeView, setActiveView] = useState('dashboard');
   const [backendStatus, setBackendStatus] = useState('Comprobando...');
-  const [dashboard, setDashboard] = useState({ summary: {}, tasks: [], clients: [], sessions: [] });
-  const [tasks, setTasks] = useState([]);
-  const [clients, setClients] = useState([]);
-  const [sessions, setSessions] = useState([]);
+  const [socketStatus, setSocketStatus] = useState('disconnected');
+  const [dashboard, setDashboard] = useState(emptyDashboard);
 
-  // ⭐ Inicializar WebSocket una sola vez
   useEffect(() => {
-    initWebSocket();
+    let isMounted = true;
+    let initialDataLoaded = false;
+    const pendingMessages = [];
 
-    // Escuchar mensajes del WebSocket
-    const unsubscribe = onWSMessage((data) => {
-      console.log("Mensaje WS recibido:", data);
-
-      // Ejemplo de integración real:
-      if (data.type === "newTask") {
-        setTasks((current) => [data.task, ...current]);
-        setDashboard((current) => ({
-          ...current,
-          tasks: [data.task, ...current.tasks],
-          summary: {
-            ...current.summary,
-            totalTasks: (current.summary.totalTasks || 0) + 1,
-            openTasks: (current.summary.openTasks || 0) + 1
-          }
-        }));
+    const unsubscribeMessages = onWSMessage((message) => {
+      if (!initialDataLoaded) {
+        pendingMessages.push(message);
+        return;
       }
-
-      if (data.type === "newClient") {
-        setClients((current) => [data.client, ...current]);
-        setDashboard((current) => ({
-          ...current,
-          clients: [data.client, ...current.clients]
-        }));
-      }
-
-      if (data.type === "newSession") {
-        setSessions((current) => [data.session, ...current]);
-        setDashboard((current) => ({
-          ...current,
-          sessions: [data.session, ...current.sessions]
-        }));
-      }
+      setDashboard((current) => updateDashboard(current, message));
     });
+    const unsubscribeStatus = onWSStatus(setSocketStatus);
+    const stopWebSocket = initWebSocket();
 
-    return () => unsubscribe();
+    const loadData = async () => {
+      try {
+        const [health, dashboardData] = await Promise.all([
+          apiFetch('/health'),
+          apiFetch('/dashboard')
+        ]);
+
+        if (!isMounted) return;
+
+        setBackendStatus(health.success ? '🟢 Backend conectado' : '🔴 Backend no disponible');
+        const currentDashboard = pendingMessages.reduce(updateDashboard, {
+          ...emptyDashboard,
+          ...dashboardData,
+          summary: { ...emptyDashboard.summary, ...dashboardData.summary }
+        });
+        initialDataLoaded = true;
+        setDashboard(currentDashboard);
+      } catch (error) {
+        if (!isMounted) return;
+        console.error('Error cargando datos:', error);
+        setBackendStatus('🔴 Backend no disponible');
+        initialDataLoaded = true;
+        pendingMessages.forEach((message) => {
+          setDashboard((current) => updateDashboard(current, message));
+        });
+      }
+    };
+
+    loadData();
+
+    return () => {
+      isMounted = false;
+      unsubscribeMessages();
+      unsubscribeStatus();
+      stopWebSocket();
+    };
   }, []);
 
-  // Funciones API REST
   const addTask = async (title) => {
     const newTask = await apiFetch('/tasks', {
       method: 'POST',
       body: JSON.stringify({ title })
     });
 
-    setTasks((current) => [newTask, ...current]);
-    setDashboard((current) => ({
-      ...current,
-      summary: {
-        ...current.summary,
-        totalTasks: (current.summary.totalTasks || 0) + 1,
-        openTasks: (current.summary.openTasks || 0) + 1
-      },
-      tasks: [newTask, ...current.tasks]
+    setDashboard((current) => updateDashboard(current, {
+      type: 'tasks:created',
+      payload: { task: newTask }
     }));
   };
 
@@ -88,32 +155,18 @@ function App() {
       method: 'PATCH'
     });
 
-    setTasks((current) =>
-      current.map((task) => (task.id === id ? updatedTask : task))
-    );
-
-    setDashboard((current) => ({
-      ...current,
-      tasks: current.tasks.map((task) => (task.id === id ? updatedTask : task)),
-      summary: {
-        ...current.summary,
-        completedTasks:
-          current.tasks.filter((task) => task.status === 'Completada').length +
-          (updatedTask.status === 'Completada' ? 1 : -1),
-        openTasks:
-          current.tasks.filter((task) => task.status === 'Pendiente').length +
-          (updatedTask.status === 'Pendiente' ? 1 : -1)
-      }
+    setDashboard((current) => updateDashboard(current, {
+      type: 'tasks:updated',
+      payload: { task: updatedTask }
     }));
   };
 
   const deleteTask = async (id) => {
     await apiFetch(`/tasks/${id}`, { method: 'DELETE' });
 
-    setTasks((current) => current.filter((task) => task.id !== id));
-    setDashboard((current) => ({
-      ...current,
-      tasks: current.tasks.filter((task) => task.id !== id)
+    setDashboard((current) => updateDashboard(current, {
+      type: 'tasks:deleted',
+      payload: { id }
     }));
   };
 
@@ -123,10 +176,9 @@ function App() {
       body: JSON.stringify(payload)
     });
 
-    setClients((current) => [client, ...current]);
-    setDashboard((current) => ({
-      ...current,
-      clients: [client, ...current.clients]
+    setDashboard((current) => updateDashboard(current, {
+      type: 'clients:created',
+      payload: { client }
     }));
   };
 
@@ -136,60 +188,24 @@ function App() {
       body: JSON.stringify(payload)
     });
 
-    setSessions((current) => [session, ...current]);
-    setDashboard((current) => ({
-      ...current,
-      sessions: [session, ...current.sessions]
+    setDashboard((current) => updateDashboard(current, {
+      type: 'sessions:created',
+      payload: { session }
     }));
   };
-
-  // Cargar datos iniciales del backend
-  useEffect(() => {
-    let isMounted = true;
-
-    const fetchData = async () => {
-      try {
-        const [health, dashboardData, taskData, clientData, sessionData] = await Promise.all([
-          apiFetch('/health'),
-          apiFetch('/dashboard'),
-          apiFetch('/tasks'),
-          apiFetch('/clients'),
-          apiFetch('/sessions')
-        ]);
-
-        if (!isMounted) return;
-
-        setBackendStatus(health.success ? '🟢 Backend conectado' : '🔴 Backend no disponible');
-        setDashboard(dashboardData);
-        setTasks(taskData);
-        setClients(clientData);
-        setSessions(sessionData);
-      } catch (error) {
-        if (!isMounted) return;
-        console.error('Error cargando datos:', error);
-        setBackendStatus('🔴 Backend no disponible');
-      }
-    };
-
-    fetchData();
-
-    return () => {
-      isMounted = false;
-    };
-  }, []);
 
   const currentPage = useMemo(() => {
     switch (activeView) {
       case 'tasks':
-        return <TasksPage tasks={tasks} onAddTask={addTask} onDeleteTask={deleteTask} onToggleTask={toggleTask} />;
+        return <TasksPage tasks={dashboard.tasks} onAddTask={addTask} onDeleteTask={deleteTask} onToggleTask={toggleTask} />;
       case 'clients':
-        return <ClientsPage clients={clients} onAddClient={addClient} />;
+        return <ClientsPage clients={dashboard.clients} onAddClient={addClient} />;
       case 'sessions':
-        return <SessionsPage sessions={sessions} onAddSession={addSession} />;
+        return <SessionsPage sessions={dashboard.sessions} onAddSession={addSession} />;
       default:
         return <DashboardPage dashboard={dashboard} />;
     }
-  }, [activeView, dashboard, tasks, clients, sessions]);
+  }, [activeView, dashboard]);
 
   return (
     <div className="app-shell">
@@ -212,8 +228,14 @@ function App() {
         </nav>
 
         <div className="status-box">
-          <span>Estado</span>
+          <span>Backend</span>
           <strong>{backendStatus}</strong>
+          <span>Tiempo real</span>
+          <strong>
+            {socketStatus === 'connected' ? '🟢 Conectado' :
+              socketStatus === 'connecting' || socketStatus === 'reconnecting' ? '🟡 Reconectando...' :
+                '🔴 Desconectado'}
+          </strong>
         </div>
       </aside>
 
